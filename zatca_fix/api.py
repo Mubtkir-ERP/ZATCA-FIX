@@ -32,6 +32,109 @@ def execute_sql(query):
 
 
 @frappe.whitelist()
+def fix_invoice_tax(invoice_name):
+	"""
+	Fix invoice by adjusting tax amount instead of item amounts
+	This is the correct method for ZATCA BR-CO-15 compliance
+	
+	Args:
+		invoice_name: Name of the Sales Invoice
+		
+	Returns:
+		dict: Fix results
+	"""
+	try:
+		invoice = frappe.get_doc("Sales Invoice", invoice_name)
+		
+		if invoice.docstatus != 1:
+			return {
+				"success": False,
+				"message": _("Invoice is not submitted")
+			}
+		
+		# Calculate difference
+		net_total = float(invoice.net_total or 0)
+		total_taxes = float(invoice.total_taxes_and_charges or 0)
+		grand_total = float(invoice.grand_total or 0)
+		
+		calculated_total = net_total + total_taxes
+		difference = round(grand_total - calculated_total, 2)
+		
+		# Check if fix is needed
+		if difference == 0:
+			return {
+				"success": True,
+				"message": _("Invoice is already correct"),
+				"difference": 0
+			}
+		
+		if abs(difference) >= 0.10:
+			return {
+				"success": False,
+				"message": _("Difference is too large: {0}").format(difference)
+			}
+		
+		# Calculate new tax amount
+		new_tax_amount = round(total_taxes + difference, 2)
+		
+		# Update invoice header
+		frappe.db.sql("""
+			UPDATE `tabSales Invoice`
+			SET total_taxes_and_charges = %s,
+			    base_total_taxes_and_charges = %s
+			WHERE name = %s
+		""", (new_tax_amount, new_tax_amount, invoice_name))
+		
+		# Update tax line (first tax row)
+		if invoice.taxes and len(invoice.taxes) > 0:
+			tax_row = invoice.taxes[0]
+			new_tax_row_amount = round(float(tax_row.tax_amount or 0) + difference, 2)
+			new_total = round(float(tax_row.total or 0) + difference, 2)
+			
+			frappe.db.sql("""
+				UPDATE `tabSales Taxes and Charges`
+				SET tax_amount = %s,
+				    base_tax_amount = %s,
+				    total = %s,
+				    base_total = %s
+				WHERE name = %s
+			""", (new_tax_row_amount, new_tax_row_amount, new_total, new_total, tax_row.name))
+		
+		# Update items tax_amount and total_amount
+		for item in invoice.items:
+			item_tax = round(float(item.tax_amount or 0) + difference, 2)
+			item_total = round(float(item.total_amount or 0) + difference, 2)
+			
+			frappe.db.sql("""
+				UPDATE `tabSales Invoice Item`
+				SET tax_amount = %s,
+				    total_amount = %s
+				WHERE name = %s
+			""", (item_tax, item_total, item.name))
+			
+			# Only update first item
+			break
+		
+		frappe.db.commit()
+		
+		return {
+			"success": True,
+			"message": _("Invoice fixed successfully"),
+			"old_tax": total_taxes,
+			"new_tax": new_tax_amount,
+			"difference": difference,
+			"invoice_name": invoice_name
+		}
+		
+	except Exception as e:
+		frappe.log_error(f"ZATCA Fix Tax Error: {str(e)}", "ZATCA Fix")
+		return {
+			"success": False,
+			"message": str(e)
+		}
+
+
+@frappe.whitelist()
 def analyze_invoice(invoice_name):
 	"""
 	Analyze invoice for rounding issues using simplified detection method
