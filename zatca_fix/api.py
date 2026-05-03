@@ -34,7 +34,11 @@ def execute_sql(query):
 @frappe.whitelist()
 def analyze_invoice(invoice_name):
 	"""
-	Analyze invoice for rounding issues
+	Analyze invoice for rounding issues using simplified detection method
+	
+	Detection Method:
+	Difference = grand_total - (net_total + total_taxes_and_charges)
+	If Difference != 0 and Difference < 0.10, it's a rounding error
 	
 	Args:
 		invoice_name: Name of the Sales Invoice
@@ -51,15 +55,27 @@ def analyze_invoice(invoice_name):
 				"message": _("Invoice is not submitted")
 			}
 		
+		# Simple detection method
+		net_total = float(invoice.net_total or 0)
+		total_taxes = float(invoice.total_taxes_and_charges or 0)
+		grand_total = float(invoice.grand_total or 0)
+		
+		calculated_total = net_total + total_taxes
+		difference = round(grand_total - calculated_total, 2)
+		
+		# Rounding error if difference is not zero but less than 0.10
+		has_issue = (difference != 0) and (abs(difference) < 0.10)
+		
+		# Detailed items analysis for fixing
 		items_analysis = []
-		calculated_total = 0
+		items_calculated_total = 0
 		
 		for item in invoice.items:
 			item_calculated_total = float(item.net_amount or 0) + float(item.tax_amount or 0)
 			item_stored_total = float(item.amount or 0)
 			item_difference = round(item_calculated_total - item_stored_total, 2)
 			
-			calculated_total += item_calculated_total
+			items_calculated_total += item_calculated_total
 			
 			items_analysis.append({
 				"name": item.name,
@@ -77,19 +93,18 @@ def analyze_invoice(invoice_name):
 				"has_issue": abs(item_difference) > 0.001
 			})
 		
-		calculated_total = round(calculated_total, 2)
-		stored_grand_total = round(float(invoice.grand_total or 0), 2)
-		total_difference = round(stored_grand_total - calculated_total, 2)
-		
 		problematic_items = [item for item in items_analysis if item["has_issue"]]
 		
 		return {
 			"success": True,
 			"invoice_name": invoice.name,
-			"calculated_total": calculated_total,
-			"stored_grand_total": stored_grand_total,
-			"total_difference": total_difference,
-			"has_issue": abs(total_difference) > 0.001,
+			"detection_method": "grand_total - (net_total + total_taxes_and_charges)",
+			"net_total": round(net_total, 2),
+			"total_taxes_and_charges": round(total_taxes, 2),
+			"calculated_total": round(calculated_total, 2),
+			"grand_total": round(grand_total, 2),
+			"difference": difference,
+			"has_issue": has_issue,
 			"items_count": len(invoice.items),
 			"problematic_items_count": len(problematic_items),
 			"items_analysis": items_analysis,

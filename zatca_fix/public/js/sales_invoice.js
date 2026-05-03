@@ -63,11 +63,24 @@ function fix_zatca_rounding_issue(frm) {
 }
 
 /**
- * Analyze invoice
+ * Analyze invoice using simplified detection method
+ * Detection: Difference = grand_total - (net_total + total_taxes_and_charges)
+ * Rounding error if: Difference != 0 AND abs(Difference) < 0.10
  */
 function analyze_invoice(frm) {
+    // Simple detection method
+    let net_total = flt(frm.doc.net_total, 2);
+    let total_taxes = flt(frm.doc.total_taxes_and_charges, 2);
+    let grand_total = flt(frm.doc.grand_total, 2);
+    
+    let calculated_total = flt(net_total + total_taxes, 2);
+    let difference = flt(grand_total - calculated_total, 2);
+    
+    // Rounding error if difference is not zero but less than 0.10
+    let has_issue = (difference !== 0) && (Math.abs(difference) < 0.10);
+    
+    // Detailed items analysis for fixing
     let items_details = [];
-    let calculated_total = 0;
     
     frm.doc.items.forEach(function(item) {
         let net = flt(item.net_amount, 2);
@@ -75,8 +88,6 @@ function analyze_invoice(frm) {
         let calculated = flt(net + tax, 2);
         let stored = flt(item.amount, 2);
         let diff = flt(calculated - stored, 2);
-        
-        calculated_total += calculated;
         
         items_details.push({
             name: item.name,
@@ -95,21 +106,21 @@ function analyze_invoice(frm) {
         });
     });
     
-    calculated_total = flt(calculated_total, 2);
-    let stored_grand_total = flt(frm.doc.grand_total, 2);
-    let total_difference = flt(stored_grand_total - calculated_total, 2);
-    
     let problematic_items = items_details.filter(item => item.has_issue);
     
     return {
         invoice_name: frm.doc.name,
+        detection_method: 'grand_total - (net_total + total_taxes_and_charges)',
+        net_total: net_total,
+        total_taxes_and_charges: total_taxes,
         calculated_total: calculated_total,
-        stored_grand_total: stored_grand_total,
-        total_difference: total_difference,
-        has_issue: Math.abs(total_difference) > 0.001,
+        grand_total: grand_total,
+        difference: difference,
+        has_issue: has_issue,
         items_count: items_details.length,
         items_details: items_details,
-        problematic_items: problematic_items
+        problematic_items: problematic_items,
+        problematic_items_count: problematic_items.length
     };
 }
 
@@ -125,9 +136,13 @@ function analyze_and_fix_invoice(frm) {
     let analysis = analyze_invoice(frm);
     
     console.log('=== Invoice Analysis ===');
+    console.log('Detection Method:', analysis.detection_method);
+    console.log('Net Total:', analysis.net_total);
+    console.log('Total Taxes:', analysis.total_taxes_and_charges);
     console.log('Calculated Total:', analysis.calculated_total);
-    console.log('Stored Total:', analysis.stored_grand_total);
-    console.log('Difference:', analysis.total_difference);
+    console.log('Grand Total:', analysis.grand_total);
+    console.log('Difference:', analysis.difference);
+    console.log('Has Issue:', analysis.has_issue);
     console.log('Problematic Items:', analysis.problematic_items);
     
     if (!analysis.has_issue) {
@@ -140,7 +155,7 @@ function analyze_and_fix_invoice(frm) {
     }
     
     frappe.show_alert({
-        message: __('Rounding difference detected: {0} SAR', [analysis.total_difference]),
+        message: __('Rounding difference detected: {0} SAR', [analysis.difference]),
         indicator: 'orange'
     });
     
@@ -155,6 +170,7 @@ function build_fix_queries(analysis) {
     let queries = [];
     
     if (analysis.problematic_items.length > 0) {
+        // Fix items that have rounding issues
         analysis.problematic_items.forEach(function(item) {
             let correct_amount = item.calculated_total;
             
@@ -170,8 +186,9 @@ function build_fix_queries(analysis) {
             });
         });
     } else {
+        // No problematic items, adjust last item with the difference
         let last_item = analysis.items_details[analysis.items_details.length - 1];
-        let adjustment = analysis.total_difference;
+        let adjustment = analysis.difference;
         let new_amount = flt(last_item.stored_total + adjustment, 2);
         
         queries.push({
@@ -276,34 +293,53 @@ ${q.query}
     let html = `
         <div style="padding: 15px;">
             <h4>Analysis Result</h4>
+            
+            <div class="alert alert-info" style="margin-bottom: 15px;">
+                <strong>Detection Method:</strong> ${analysis.detection_method || 'grand_total - (net_total + total_taxes_and_charges)'}
+            </div>
+            
             <table class="table table-bordered">
                 <tr>
                     <td><b>Invoice:</b></td>
                     <td>${analysis.invoice_name}</td>
                 </tr>
                 <tr>
-                    <td><b>Calculated Total:</b></td>
+                    <td><b>Net Total:</b></td>
+                    <td>${format_currency(analysis.net_total)}</td>
+                </tr>
+                <tr>
+                    <td><b>Total Taxes and Charges:</b></td>
+                    <td>${format_currency(analysis.total_taxes_and_charges)}</td>
+                </tr>
+                <tr>
+                    <td><b>Calculated Total (Net + Tax):</b></td>
                     <td>${format_currency(analysis.calculated_total)}</td>
                 </tr>
                 <tr>
-                    <td><b>Stored Total:</b></td>
-                    <td>${format_currency(analysis.stored_grand_total)}</td>
+                    <td><b>Grand Total (Stored):</b></td>
+                    <td>${format_currency(analysis.grand_total)}</td>
                 </tr>
                 <tr>
                     <td><b>Difference:</b></td>
                     <td style="color: ${analysis.has_issue ? 'red' : 'green'}; font-weight: bold;">
-                        ${format_currency(analysis.total_difference)}
+                        ${format_currency(analysis.difference)}
                     </td>
                 </tr>
                 <tr>
                     <td><b>Status:</b></td>
                     <td>
                         <span class="indicator ${analysis.has_issue ? 'red' : 'green'}">
-                            ${analysis.has_issue ? 'Has Issue' : 'Correct'}
+                            ${analysis.has_issue ? 'Has Rounding Issue' : 'Correct'}
                         </span>
                     </td>
                 </tr>
             </table>
+            
+            ${analysis.has_issue ? `
+                <div class="alert alert-warning" style="margin-top: 15px;">
+                    <strong>Rounding Error Detected:</strong> Difference is ${format_currency(analysis.difference)} (less than 0.10 SAR)
+                </div>
+            ` : ''}
             
             <h5 style="margin-top: 20px;">Items Details:</h5>
             <table class="table table-bordered table-sm">
@@ -368,7 +404,7 @@ function show_fix_result(analysis, sql_queries) {
             <table class="table table-bordered">
                 <tr>
                     <td><b>Fixed Difference:</b></td>
-                    <td>${format_currency(analysis.total_difference)}</td>
+                    <td>${format_currency(analysis.difference)}</td>
                 </tr>
                 <tr>
                     <td><b>Modified Items:</b></td>
