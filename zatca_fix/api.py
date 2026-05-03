@@ -34,8 +34,13 @@ def execute_sql(query):
 @frappe.whitelist()
 def fix_invoice_tax(invoice_name):
 	"""
-	Fix invoice by adjusting tax amount instead of item amounts
-	This is the correct method for ZATCA BR-CO-15 compliance
+	Fix invoice by adjusting tax amount (CORRECT METHOD)
+	
+	Rules:
+	1. Keep net_amount unchanged (tax base must not change)
+	2. Adjust tax_amount by the difference
+	3. Update total_amount = net_amount + new_tax_amount
+	4. Update item_wise_tax_detail JSON with new tax value
 	
 	Args:
 		invoice_name: Name of the Sales Invoice
@@ -77,7 +82,7 @@ def fix_invoice_tax(invoice_name):
 		# Calculate new tax amount
 		new_tax_amount = round(total_taxes + difference, 2)
 		
-		# Update invoice header
+		# 1. Update invoice header
 		frappe.db.sql("""
 			UPDATE `tabSales Invoice`
 			SET total_taxes_and_charges = %s,
@@ -85,35 +90,58 @@ def fix_invoice_tax(invoice_name):
 			WHERE name = %s
 		""", (new_tax_amount, new_tax_amount, invoice_name))
 		
-		# Update tax line (first tax row)
+		# 2. Update tax line with new item_wise_tax_detail JSON
 		if invoice.taxes and len(invoice.taxes) > 0:
 			tax_row = invoice.taxes[0]
 			new_tax_row_amount = round(float(tax_row.tax_amount or 0) + difference, 2)
-			new_total = round(float(tax_row.total or 0) + difference, 2)
+			
+			# Build new item_wise_tax_detail JSON
+			import json
+			item_wise_tax = {}
+			try:
+				if tax_row.item_wise_tax_detail:
+					item_wise_tax = json.loads(tax_row.item_wise_tax_detail)
+			except:
+				pass
+			
+			# Update tax for first item in JSON
+			if invoice.items and len(invoice.items) > 0:
+				first_item = invoice.items[0]
+				item_key = first_item.item_code or first_item.item_name
+				if item_key in item_wise_tax:
+					# Keep rate, update amount
+					tax_rate = item_wise_tax[item_key][0]
+					item_wise_tax[item_key] = [tax_rate, new_tax_row_amount]
+			
+			item_wise_tax_json = json.dumps(item_wise_tax, ensure_ascii=False)
 			
 			frappe.db.sql("""
 				UPDATE `tabSales Taxes and Charges`
 				SET tax_amount = %s,
 				    base_tax_amount = %s,
 				    total = %s,
-				    base_total = %s
+				    base_total = %s,
+				    item_wise_tax_detail = %s
 				WHERE name = %s
-			""", (new_tax_row_amount, new_tax_row_amount, new_total, new_total, tax_row.name))
+			""", (new_tax_row_amount, new_tax_row_amount, grand_total, grand_total, 
+			      item_wise_tax_json, tax_row.name))
 		
-		# Update items tax_amount and total_amount
-		for item in invoice.items:
-			item_tax = round(float(item.tax_amount or 0) + difference, 2)
-			item_total = round(float(item.total_amount or 0) + difference, 2)
+		# 3. Update first item: tax_amount and total_amount (keep net_amount unchanged)
+		if invoice.items and len(invoice.items) > 0:
+			first_item = invoice.items[0]
+			old_item_tax = float(first_item.tax_amount or 0)
+			new_item_tax = round(old_item_tax + difference, 2)
+			
+			# total_amount = net_amount + tax_amount (net_amount stays the same)
+			item_net = float(first_item.net_amount or 0)
+			new_item_total = round(item_net + new_item_tax, 2)
 			
 			frappe.db.sql("""
 				UPDATE `tabSales Invoice Item`
 				SET tax_amount = %s,
 				    total_amount = %s
 				WHERE name = %s
-			""", (item_tax, item_total, item.name))
-			
-			# Only update first item
-			break
+			""", (new_item_tax, new_item_total, first_item.name))
 		
 		frappe.db.commit()
 		
@@ -123,7 +151,8 @@ def fix_invoice_tax(invoice_name):
 			"old_tax": total_taxes,
 			"new_tax": new_tax_amount,
 			"difference": difference,
-			"invoice_name": invoice_name
+			"invoice_name": invoice_name,
+			"method": "Adjusted tax_amount only (net_amount unchanged)"
 		}
 		
 	except Exception as e:

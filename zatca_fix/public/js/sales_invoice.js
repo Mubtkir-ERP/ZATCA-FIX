@@ -165,15 +165,26 @@ function show_analysis_dialog(analysis, frm) {
     if (analysis.has_issue) {
         let new_tax = analysis.total_taxes_and_charges + analysis.difference;
         
+        // Get first item info for SQL
+        let first_item = analysis.items_analysis && analysis.items_analysis.length > 0 ? analysis.items_analysis[0] : null;
+        let item_net = first_item ? first_item.net_amount : 0;
+        let item_old_tax = first_item ? first_item.tax_amount : 0;
+        let item_new_tax = item_old_tax + analysis.difference;
+        let item_new_total = item_net + item_new_tax;
+        let item_name = first_item ? first_item.name : '';
+        let item_code = first_item ? first_item.item_code : '';
+        let tax_rate = first_item ? first_item.tax_rate : 15;
+        
         solution_html = `
             <div class="alert alert-info" style="margin-top: 20px;">
                 <h5><i class="fa fa-wrench"></i> Solution (Correct Method):</h5>
                 
-                <p><strong>Fix by adjusting TAX amount (not item amounts):</strong></p>
+                <p><strong>Fix by adjusting TAX amount ONLY (net_amount unchanged):</strong></p>
                 <ul>
+                    <li>Net Total: ${format_currency(analysis.net_total)} (unchanged ✓)</li>
                     <li>Current Tax: ${format_currency(analysis.total_taxes_and_charges)}</li>
-                    <li>New Tax: ${format_currency(new_tax)}</li>
-                    <li>Adjustment: ${format_currency(analysis.difference)}</li>
+                    <li>New Tax: ${format_currency(new_tax)} (+${format_currency(analysis.difference)})</li>
+                    <li>Grand Total: ${format_currency(analysis.grand_total)} (target)</li>
                 </ul>
                 
                 <p style="margin-top: 15px;"><strong>Option 1: Use Button (Recommended)</strong></p>
@@ -181,41 +192,54 @@ function show_analysis_dialog(analysis, frm) {
                 
                 <p style="margin-top: 15px;"><strong>Option 2: Execute SQL Manually</strong></p>
                 <div style="background: #f5f5f5; padding: 10px; border-radius: 5px; margin-top: 10px;">
-                    <div style="margin-bottom: 10px;">
+                    <div style="margin-bottom: 15px;">
                         <strong>Query 1 - Update Invoice Header:</strong><br>
                         <code style="display: block; white-space: pre-wrap; font-size: 11px; color: #d63384;">
 UPDATE \`tabSales Invoice\`
-SET total_taxes_and_charges = ${new_tax},
-    base_total_taxes_and_charges = ${new_tax}
-WHERE name = '${analysis.invoice_name}'
+SET total_taxes_and_charges = ${new_tax.toFixed(2)},
+    base_total_taxes_and_charges = ${new_tax.toFixed(2)}
+WHERE name = '${analysis.invoice_name}';
                         </code>
                     </div>
-                    <div style="margin-bottom: 10px;">
-                        <strong>Query 2 - Update Tax Line:</strong><br>
+                    <div style="margin-bottom: 15px;">
+                        <strong>Query 2 - Update Tax Line (with JSON):</strong><br>
                         <code style="display: block; white-space: pre-wrap; font-size: 11px; color: #d63384;">
 UPDATE \`tabSales Taxes and Charges\`
-SET tax_amount = ${new_tax},
-    base_tax_amount = ${new_tax},
-    total = ${analysis.grand_total},
-    base_total = ${analysis.grand_total}
-WHERE parent = '${analysis.invoice_name}'
+SET tax_amount = ${new_tax.toFixed(2)},
+    base_tax_amount = ${new_tax.toFixed(2)},
+    total = ${analysis.grand_total.toFixed(2)},
+    base_total = ${analysis.grand_total.toFixed(2)},
+    item_wise_tax_detail = '{"${item_code}":[${tax_rate},${new_tax.toFixed(2)}]}'
+WHERE parent = '${analysis.invoice_name}';
                         </code>
+                        <small style="color: #666; display: block; margin-top: 5px;">
+                            ⚠️ Important: Updates item_wise_tax_detail JSON with new tax value
+                        </small>
                     </div>
                     <div style="margin-bottom: 10px;">
-                        <strong>Query 3 - Update First Item:</strong><br>
+                        <strong>Query 3 - Update First Item (net_amount unchanged):</strong><br>
                         <code style="display: block; white-space: pre-wrap; font-size: 11px; color: #d63384;">
 UPDATE \`tabSales Invoice Item\`
-SET tax_amount = ${new_tax},
-    total_amount = ${analysis.grand_total}
-WHERE parent = '${analysis.invoice_name}'
-LIMIT 1
+SET tax_amount = ${item_new_tax.toFixed(2)},
+    total_amount = ${item_new_total.toFixed(2)}
+WHERE name = '${item_name}';
                         </code>
+                        <small style="color: #666; display: block; margin-top: 5px;">
+                            Item: ${item_code} | Net: ${format_currency(item_net)} (unchanged) | 
+                            Tax: ${format_currency(item_old_tax)} → ${format_currency(item_new_tax)} | 
+                            Total: ${format_currency(item_new_total)}
+                        </small>
                     </div>
                 </div>
                 
                 <div class="alert alert-warning" style="margin-top: 10px;">
-                    <strong>Important:</strong> This method adjusts TAX, not item amounts. 
-                    Net amount (${format_currency(analysis.net_total)}) remains unchanged.
+                    <strong>Important Rules:</strong>
+                    <ul style="margin-bottom: 0;">
+                        <li>✓ net_amount stays unchanged (${format_currency(analysis.net_total)})</li>
+                        <li>✓ tax_amount adjusted by ${format_currency(analysis.difference)}</li>
+                        <li>✓ total_amount = net_amount + new_tax_amount</li>
+                        <li>✓ item_wise_tax_detail JSON updated with new tax value</li>
+                    </ul>
                 </div>
             </div>
         `;
