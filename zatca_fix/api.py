@@ -41,6 +41,7 @@ def fix_invoice_tax(invoice_name):
 	2. Adjust tax_amount by the difference
 	3. Update total_amount = net_amount + new_tax_amount
 	4. Update item_wise_tax_detail JSON with new tax value
+	5. Fix ALL decimal precision issues (2 decimals only)
 	
 	Args:
 		invoice_name: Name of the Sales Invoice
@@ -61,6 +62,7 @@ def fix_invoice_tax(invoice_name):
 		net_total = float(invoice.net_total or 0)
 		total_taxes = float(invoice.total_taxes_and_charges or 0)
 		grand_total = float(invoice.grand_total or 0)
+		base_total = float(invoice.base_total or 0)
 		
 		calculated_total = net_total + total_taxes
 		difference = round(grand_total - calculated_total, 2)
@@ -82,13 +84,16 @@ def fix_invoice_tax(invoice_name):
 		# Calculate new tax amount
 		new_tax_amount = round(total_taxes + difference, 2)
 		
-		# 1. Update invoice header
+		# 1. Update invoice header - CRITICAL: Fix base_total too!
+		new_base_total = round(base_total + difference, 2)
+		
 		frappe.db.sql("""
 			UPDATE `tabSales Invoice`
 			SET total_taxes_and_charges = %s,
-			    base_total_taxes_and_charges = %s
+			    base_total_taxes_and_charges = %s,
+			    base_total = %s
 			WHERE name = %s
-		""", (new_tax_amount, new_tax_amount, invoice_name))
+		""", (new_tax_amount, new_tax_amount, new_base_total, invoice_name))
 		
 		# 2. Update tax line with new item_wise_tax_detail JSON
 		if invoice.taxes and len(invoice.taxes) > 0:
@@ -115,15 +120,19 @@ def fix_invoice_tax(invoice_name):
 			
 			item_wise_tax_json = json.dumps(item_wise_tax, ensure_ascii=False)
 			
+			# CRITICAL: Round to 2 decimals only!
 			frappe.db.sql("""
 				UPDATE `tabSales Taxes and Charges`
 				SET tax_amount = %s,
 				    base_tax_amount = %s,
 				    total = %s,
 				    base_total = %s,
+				    tax_amount_after_discount_amount = %s,
+				    base_tax_amount_after_discount_amount = %s,
 				    item_wise_tax_detail = %s
 				WHERE name = %s
-			""", (new_tax_row_amount, new_tax_row_amount, grand_total, grand_total, 
+			""", (new_tax_row_amount, new_tax_row_amount, grand_total, grand_total,
+			      new_tax_row_amount, new_tax_row_amount,
 			      item_wise_tax_json, tax_row.name))
 		
 		# 3. Update first item: tax_amount and total_amount (keep net_amount unchanged)
@@ -136,12 +145,14 @@ def fix_invoice_tax(invoice_name):
 			item_net = float(first_item.net_amount or 0)
 			new_item_total = round(item_net + new_item_tax, 2)
 			
+			# CRITICAL: Update base_amount too!
 			frappe.db.sql("""
 				UPDATE `tabSales Invoice Item`
 				SET tax_amount = %s,
-				    total_amount = %s
+				    total_amount = %s,
+				    base_amount = %s
 				WHERE name = %s
-			""", (new_item_tax, new_item_total, first_item.name))
+			""", (new_item_tax, new_item_total, new_item_total, first_item.name))
 		
 		frappe.db.commit()
 		
@@ -571,12 +582,14 @@ def fix_item_level_discrepancy(invoice_name):
 		for item_data in analysis["problematic_items"]:
 			new_amount = round(item_data["net_amount"] + item_data["tax_amount"], 2)
 			
+			# CRITICAL: Also update base_amount and ensure amount matches rate × qty
 			frappe.db.sql("""
 				UPDATE `tabSales Invoice Item`
 				SET amount = %s,
-				    base_amount = %s
+				    base_amount = %s,
+				    total_amount = %s
 				WHERE name = %s
-			""", (new_amount, new_amount, item_data["name"]))
+			""", (new_amount, new_amount, new_amount, item_data["name"]))
 			
 			fixed_items.append({
 				"item_code": item_data["item_code"],
