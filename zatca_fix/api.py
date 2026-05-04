@@ -249,3 +249,563 @@ def analyze_invoice(invoice_name):
 			"success": False,
 			"message": str(e)
 		}
+
+
+# ============================================
+# NEW PHASE 2: BR-CO-14 JSON Discrepancy Detection & Fix
+# ============================================
+
+@frappe.whitelist()
+def analyze_json_discrepancy(invoice_name):
+	"""
+	Analyze JSON discrepancy (BR-CO-14)
+	
+	Detection Method:
+	Compare item_wise_tax_detail JSON values with actual item tax amounts
+	If they don't match, it's a JSON discrepancy that causes BR-CO-14
+	
+	Args:
+		invoice_name: Name of the Sales Invoice
+		
+	Returns:
+		dict: JSON discrepancy analysis results
+	"""
+	try:
+		import json
+		
+		invoice = frappe.get_doc("Sales Invoice", invoice_name)
+		
+		if invoice.docstatus != 1:
+			return {
+				"success": False,
+				"message": _("Invoice is not submitted")
+			}
+		
+		# Get item_wise_tax_detail JSON from tax line
+		item_wise_tax_json = {}
+		if invoice.taxes and len(invoice.taxes) > 0:
+			tax_row = invoice.taxes[0]
+			if tax_row.item_wise_tax_detail:
+				try:
+					item_wise_tax_json = json.loads(tax_row.item_wise_tax_detail)
+				except:
+					pass
+		
+		# Compare JSON values with actual item tax amounts
+		items_comparison = []
+		json_total_tax = 0
+		actual_total_tax = 0
+		mismatched_items = []
+		
+		for item in invoice.items:
+			item_code = item.item_code or item.item_name
+			actual_tax = float(item.tax_amount or 0)
+			actual_total_tax += actual_tax
+			
+			# Get tax from JSON
+			json_tax = 0
+			if item_code in item_wise_tax_json:
+				# JSON format: [tax_rate, tax_amount]
+				json_tax = float(item_wise_tax_json[item_code][1]) if len(item_wise_tax_json[item_code]) > 1 else 0
+			
+			json_total_tax += json_tax
+			
+			difference = round(json_tax - actual_tax, 2)
+			has_mismatch = abs(difference) > 0.001
+			
+			items_comparison.append({
+				"item_code": item_code,
+				"item_name": item.item_name,
+				"json_tax": round(json_tax, 2),
+				"actual_tax": round(actual_tax, 2),
+				"difference": difference,
+				"has_mismatch": has_mismatch
+			})
+			
+			if has_mismatch:
+				mismatched_items.append({
+					"item_code": item_code,
+					"json_tax": round(json_tax, 2),
+					"actual_tax": round(actual_tax, 2),
+					"difference": difference
+				})
+		
+		json_discrepancy = round(json_total_tax - actual_total_tax, 2)
+		has_json_issue = abs(json_discrepancy) > 0.001
+		
+		return {
+			"success": True,
+			"invoice_name": invoice.name,
+			"detection_method": "Compare item_wise_tax_detail JSON with actual item tax amounts",
+			"json_total_tax": round(json_total_tax, 2),
+			"actual_total_tax": round(actual_total_tax, 2),
+			"json_discrepancy": json_discrepancy,
+			"has_json_issue": has_json_issue,
+			"items_count": len(invoice.items),
+			"mismatched_items_count": len(mismatched_items),
+			"items_comparison": items_comparison,
+			"mismatched_items": mismatched_items
+		}
+		
+	except Exception as e:
+		frappe.log_error(f"ZATCA JSON Analysis Error: {str(e)}", "ZATCA Fix")
+		return {
+			"success": False,
+			"message": str(e)
+		}
+
+
+@frappe.whitelist()
+def fix_json_discrepancy(invoice_name):
+	"""
+	Fix JSON discrepancy (BR-CO-14)
+	
+	Method:
+	Synchronize item_wise_tax_detail JSON with actual item tax amounts
+	
+	Args:
+		invoice_name: Name of the Sales Invoice
+		
+	Returns:
+		dict: Fix results
+	"""
+	try:
+		import json
+		
+		invoice = frappe.get_doc("Sales Invoice", invoice_name)
+		
+		if invoice.docstatus != 1:
+			return {
+				"success": False,
+				"message": _("Invoice is not submitted")
+			}
+		
+		# Get current JSON
+		old_item_wise_tax_json = {}
+		if invoice.taxes and len(invoice.taxes) > 0:
+			tax_row = invoice.taxes[0]
+			if tax_row.item_wise_tax_detail:
+				try:
+					old_item_wise_tax_json = json.loads(tax_row.item_wise_tax_detail)
+				except:
+					pass
+		
+		# Build new JSON with actual tax amounts
+		new_item_wise_tax_json = {}
+		fixed_items = []
+		old_json_total = 0
+		new_json_total = 0
+		
+		for item in invoice.items:
+			item_code = item.item_code or item.item_name
+			actual_tax = float(item.tax_amount or 0)
+			tax_rate = float(item.tax_rate or 0)
+			
+			# Get old JSON tax
+			old_json_tax = 0
+			if item_code in old_item_wise_tax_json:
+				old_json_tax = float(old_item_wise_tax_json[item_code][1]) if len(old_item_wise_tax_json[item_code]) > 1 else 0
+			
+			old_json_total += old_json_tax
+			new_json_total += actual_tax
+			
+			# Update JSON with actual tax
+			new_item_wise_tax_json[item_code] = [tax_rate, round(actual_tax, 2)]
+			
+			if abs(old_json_tax - actual_tax) > 0.001:
+				fixed_items.append({
+					"item_code": item_code,
+					"old_json_tax": round(old_json_tax, 2),
+					"new_json_tax": round(actual_tax, 2)
+				})
+		
+		# Update tax line with new JSON
+		if invoice.taxes and len(invoice.taxes) > 0:
+			tax_row = invoice.taxes[0]
+			new_json_str = json.dumps(new_item_wise_tax_json, ensure_ascii=False)
+			
+			frappe.db.sql("""
+				UPDATE `tabSales Taxes and Charges`
+				SET item_wise_tax_detail = %s
+				WHERE name = %s
+			""", (new_json_str, tax_row.name))
+		
+		frappe.db.commit()
+		
+		return {
+			"success": True,
+			"message": _("JSON discrepancy fixed successfully"),
+			"invoice_name": invoice_name,
+			"items_fixed": len(fixed_items),
+			"old_json_total": round(old_json_total, 2),
+			"new_json_total": round(new_json_total, 2),
+			"fixed_items": fixed_items
+		}
+		
+	except Exception as e:
+		frappe.log_error(f"ZATCA JSON Fix Error: {str(e)}", "ZATCA Fix")
+		return {
+			"success": False,
+			"message": str(e)
+		}
+
+
+# ============================================
+# NEW PHASE 3: Item-Level Internal Consistency Check
+# ============================================
+
+@frappe.whitelist()
+def analyze_item_level_discrepancy(invoice_name):
+	"""
+	Analyze item-level internal discrepancies (BR-CO-16)
+	
+	Detection Method:
+	For each item: item.amount should equal (item.net_amount + item.tax_amount)
+	This catches "lost halalas" within individual items
+	
+	Args:
+		invoice_name: Name of the Sales Invoice
+		
+	Returns:
+		dict: Item-level discrepancy analysis results
+	"""
+	try:
+		invoice = frappe.get_doc("Sales Invoice", invoice_name)
+		
+		if invoice.docstatus != 1:
+			return {
+				"success": False,
+				"message": _("Invoice is not submitted")
+			}
+		
+		problematic_items = []
+		total_item_discrepancy = 0
+		items_analysis = []
+		
+		for item in invoice.items:
+			stored_amount = float(item.amount or 0)
+			net_amount = float(item.net_amount or 0)
+			tax_amount = float(item.tax_amount or 0)
+			
+			calculated_amount = round(net_amount + tax_amount, 2)
+			difference = round(stored_amount - calculated_amount, 2)
+			has_discrepancy = abs(difference) > 0.001
+			
+			items_analysis.append({
+				"name": item.name,
+				"item_code": item.item_code,
+				"item_name": item.item_name,
+				"qty": item.qty,
+				"rate": round(float(item.rate or 0), 2),
+				"stored_amount": round(stored_amount, 2),
+				"net_amount": round(net_amount, 2),
+				"tax_rate": round(float(item.tax_rate or 0), 2),
+				"tax_amount": round(tax_amount, 2),
+				"calculated_amount": round(calculated_amount, 2),
+				"difference": difference,
+				"has_discrepancy": has_discrepancy
+			})
+			
+			if has_discrepancy:
+				problematic_items.append({
+					"name": item.name,
+					"item_code": item.item_code,
+					"stored_amount": round(stored_amount, 2),
+					"net_amount": round(net_amount, 2),
+					"tax_amount": round(tax_amount, 2),
+					"calculated_amount": round(calculated_amount, 2),
+					"difference": difference
+				})
+				total_item_discrepancy += difference
+		
+		has_item_discrepancy = len(problematic_items) > 0
+		
+		return {
+			"success": True,
+			"invoice_name": invoice.name,
+			"detection_method": "item.amount vs (item.net_amount + item.tax_amount)",
+			"has_item_discrepancy": has_item_discrepancy,
+			"problematic_items_count": len(problematic_items),
+			"total_discrepancy": round(total_item_discrepancy, 2),
+			"items_analysis": items_analysis,
+			"problematic_items": problematic_items
+		}
+		
+	except Exception as e:
+		frappe.log_error(f"ZATCA Item Level Analysis Error: {str(e)}", "ZATCA Fix")
+		return {
+			"success": False,
+			"message": str(e)
+		}
+
+
+@frappe.whitelist()
+def fix_item_level_discrepancy(invoice_name):
+	"""
+	Fix item-level discrepancies (BR-CO-16)
+	
+	Method:
+	Adjust item.amount to match (item.net_amount + item.tax_amount)
+	
+	Args:
+		invoice_name: Name of the Sales Invoice
+		
+	Returns:
+		dict: Fix results
+	"""
+	try:
+		analysis = analyze_item_level_discrepancy(invoice_name)
+		
+		if not analysis.get("success"):
+			return analysis
+		
+		if not analysis.get("has_item_discrepancy"):
+			return {
+				"success": True,
+				"message": _("No item discrepancies found"),
+				"items_fixed": 0
+			}
+		
+		fixed_items = []
+		
+		for item_data in analysis["problematic_items"]:
+			new_amount = round(item_data["net_amount"] + item_data["tax_amount"], 2)
+			
+			frappe.db.sql("""
+				UPDATE `tabSales Invoice Item`
+				SET amount = %s,
+				    base_amount = %s
+				WHERE name = %s
+			""", (new_amount, new_amount, item_data["name"]))
+			
+			fixed_items.append({
+				"item_code": item_data["item_code"],
+				"old_amount": item_data["stored_amount"],
+				"new_amount": new_amount,
+				"adjustment": round(new_amount - item_data["stored_amount"], 2)
+			})
+		
+		frappe.db.commit()
+		
+		return {
+			"success": True,
+			"message": _("Item discrepancies fixed successfully"),
+			"invoice_name": invoice_name,
+			"items_fixed": len(fixed_items),
+			"total_adjustment": round(analysis["total_discrepancy"], 2),
+			"fixed_items": fixed_items
+		}
+		
+	except Exception as e:
+		frappe.log_error(f"ZATCA Item Level Fix Error: {str(e)}", "ZATCA Fix")
+		return {
+			"success": False,
+			"message": str(e)
+		}
+
+
+# ============================================
+# COMPLETE COMPREHENSIVE ANALYSIS (All 3 Phases)
+# ============================================
+
+@frappe.whitelist()
+def analyze_complete(invoice_name):
+	"""
+	Complete comprehensive analysis for all ZATCA issues
+	
+	Phases:
+	1. BR-CO-15: Header vs Body balance (grand_total vs net+tax)
+	2. BR-CO-14: JSON discrepancy (item_wise_tax_detail vs actual)
+	3. BR-CO-16: Item-level consistency (item.amount vs item.net+item.tax)
+	
+	Args:
+		invoice_name: Name of the Sales Invoice
+		
+	Returns:
+		dict: Complete analysis results with recommendations
+	"""
+	try:
+		# Run all three analyses
+		br_co_15_result = analyze_invoice(invoice_name)
+		br_co_14_result = analyze_json_discrepancy(invoice_name)
+		br_co_16_result = analyze_item_level_discrepancy(invoice_name)
+		
+		if not br_co_15_result.get("success") or not br_co_14_result.get("success") or not br_co_16_result.get("success"):
+			return {
+				"success": False,
+				"message": _("Analysis failed")
+			}
+		
+		# Determine issues and recommendations
+		issues_found = []
+		recommendations = []
+		fix_sequence = []
+		
+		# Check BR-CO-16 first (item-level issues should be fixed first)
+		if br_co_16_result.get("has_item_discrepancy"):
+			issues_found.append({
+				"code": "BR-CO-16",
+				"title": "Item-Level Discrepancy",
+				"severity": "high",
+				"description": f"Found {br_co_16_result['problematic_items_count']} item(s) with internal inconsistency",
+				"impact": f"Total discrepancy: {br_co_16_result['total_discrepancy']} SAR"
+			})
+			recommendations.append({
+				"step": 1,
+				"action": "Fix Item Discrepancy",
+				"button": "Fix BR-CO-16",
+				"reason": "Item amounts don't match (net + tax). Fix this first before other checks."
+			})
+			fix_sequence.append("BR-CO-16")
+		
+		# Check BR-CO-14 (JSON discrepancy)
+		if br_co_14_result.get("has_json_issue"):
+			issues_found.append({
+				"code": "BR-CO-14",
+				"title": "JSON Discrepancy",
+				"severity": "high",
+				"description": f"item_wise_tax_detail JSON doesn't match actual tax amounts",
+				"impact": f"JSON discrepancy: {br_co_14_result['json_discrepancy']} SAR"
+			})
+			step_num = len(recommendations) + 1
+			recommendations.append({
+				"step": step_num,
+				"action": "Fix JSON Discrepancy",
+				"button": "Fix BR-CO-14",
+				"reason": "ZATCA reads tax from JSON. Must synchronize with actual values."
+			})
+			fix_sequence.append("BR-CO-14")
+		
+		# Check BR-CO-15 (header vs body)
+		if br_co_15_result.get("has_issue"):
+			issues_found.append({
+				"code": "BR-CO-15",
+				"title": "Rounding Issue",
+				"severity": "medium",
+				"description": "Grand total doesn't match (net + tax)",
+				"impact": f"Difference: {br_co_15_result['difference']} SAR"
+			})
+			step_num = len(recommendations) + 1
+			recommendations.append({
+				"step": step_num,
+				"action": "Fix Rounding Issue",
+				"button": "Fix BR-CO-15",
+				"reason": "Adjust tax amount to match grand total."
+			})
+			fix_sequence.append("BR-CO-15")
+		
+		# Overall status
+		has_any_issue = len(issues_found) > 0
+		status = "issues_found" if has_any_issue else "all_clear"
+		
+		# Summary statistics
+		summary = {
+			"total_issues": len(issues_found),
+			"critical_issues": len([i for i in issues_found if i["severity"] == "high"]),
+			"invoice_status": "Needs Fixing" if has_any_issue else "Ready for ZATCA",
+			"fix_sequence": fix_sequence
+		}
+		
+		return {
+			"success": True,
+			"invoice_name": invoice_name,
+			"status": status,
+			"summary": summary,
+			"issues_found": issues_found,
+			"recommendations": recommendations,
+			"br_co_15": br_co_15_result,
+			"br_co_14": br_co_14_result,
+			"br_co_16": br_co_16_result,
+			"has_any_issue": has_any_issue
+		}
+		
+	except Exception as e:
+		frappe.log_error(f"ZATCA Complete Analysis Error: {str(e)}", "ZATCA Fix")
+		return {
+			"success": False,
+			"message": str(e)
+		}
+
+
+@frappe.whitelist()
+def fix_all_issues(invoice_name):
+	"""
+	Fix all detected issues in the correct sequence
+	
+	Sequence:
+	1. BR-CO-16: Fix item-level discrepancies first
+	2. BR-CO-14: Synchronize JSON with actual values
+	3. BR-CO-15: Adjust tax to match grand total
+	
+	Args:
+		invoice_name: Name of the Sales Invoice
+		
+	Returns:
+		dict: Complete fix results
+	"""
+	try:
+		# First, analyze to determine what needs fixing
+		analysis = analyze_complete(invoice_name)
+		
+		if not analysis.get("success"):
+			return analysis
+		
+		if not analysis.get("has_any_issue"):
+			return {
+				"success": True,
+				"message": _("No issues found. Invoice is ready for ZATCA."),
+				"fixes_applied": []
+			}
+		
+		fixes_applied = []
+		
+		# Step 1: Fix BR-CO-16 (item-level)
+		if analysis["br_co_16"].get("has_item_discrepancy"):
+			fix_result = fix_item_level_discrepancy(invoice_name)
+			if fix_result.get("success"):
+				fixes_applied.append({
+					"code": "BR-CO-16",
+					"title": "Item-Level Discrepancy Fixed",
+					"items_fixed": fix_result.get("items_fixed", 0),
+					"details": fix_result.get("fixed_items", [])
+				})
+		
+		# Step 2: Fix BR-CO-14 (JSON)
+		if analysis["br_co_14"].get("has_json_issue"):
+			fix_result = fix_json_discrepancy(invoice_name)
+			if fix_result.get("success"):
+				fixes_applied.append({
+					"code": "BR-CO-14",
+					"title": "JSON Discrepancy Fixed",
+					"items_fixed": fix_result.get("items_fixed", 0),
+					"details": fix_result.get("fixed_items", [])
+				})
+		
+		# Step 3: Fix BR-CO-15 (rounding)
+		if analysis["br_co_15"].get("has_issue"):
+			fix_result = fix_invoice_tax(invoice_name)
+			if fix_result.get("success"):
+				fixes_applied.append({
+					"code": "BR-CO-15",
+					"title": "Rounding Issue Fixed",
+					"adjustment": fix_result.get("difference", 0),
+					"details": {
+						"old_tax": fix_result.get("old_tax", 0),
+						"new_tax": fix_result.get("new_tax", 0)
+					}
+				})
+		
+		return {
+			"success": True,
+			"message": _("All issues fixed successfully!"),
+			"invoice_name": invoice_name,
+			"fixes_count": len(fixes_applied),
+			"fixes_applied": fixes_applied
+		}
+		
+	except Exception as e:
+		frappe.log_error(f"ZATCA Fix All Error: {str(e)}", "ZATCA Fix")
+		return {
+			"success": False,
+			"message": str(e)
+		}
