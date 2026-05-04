@@ -269,13 +269,13 @@ def analyze_invoice(invoice_name):
 @frappe.whitelist()
 def analyze_json_discrepancy(invoice_name):
 	"""
-	Analyze JSON discrepancy (BR-CO-14) - ZATCA AUDITOR MODE
+	Analyze JSON discrepancy (BR-CO-14) - ZATCA AUDITOR MODE (CORRECTED)
 	
-	Detection Method:
-	Compare item_wise_tax_detail JSON with HEADER total_taxes_and_charges
-	NOT with sum of item tax amounts!
+	Detection Method (CORRECTED):
+	Compare item_wise_tax_detail JSON with ACTUAL ITEM TAX AMOUNTS (sum of item.tax_amount)
+	This is the TRUE source of truth that ZATCA validates against!
 	
-	ZATCA reads from JSON and compares with header, not with items.
+	The issue: JSON and Header can both be wrong together, but items are the real calculation.
 	
 	Args:
 		invoice_name: Name of the Sales Invoice
@@ -294,7 +294,7 @@ def analyze_json_discrepancy(invoice_name):
 				"message": _("Invoice is not submitted")
 			}
 		
-		# Get header tax total (what ZATCA expects)
+		# Get header tax total (for reference)
 		header_tax_total = float(invoice.total_taxes_and_charges or 0)
 		
 		# Get item_wise_tax_detail JSON from tax line
@@ -315,13 +315,13 @@ def analyze_json_discrepancy(invoice_name):
 		
 		json_total_tax = round(json_total_tax, 2)
 		
-		# CRITICAL: Compare JSON with HEADER, not with items!
-		json_discrepancy = round(json_total_tax - header_tax_total, 2)
-		has_json_issue = abs(json_discrepancy) > 0.001
-		
-		# Also get actual item tax for reference
+		# CRITICAL FIX: Get actual item tax (THE TRUE SOURCE OF TRUTH!)
 		actual_total_tax = sum(float(item.tax_amount or 0) for item in invoice.items)
 		actual_total_tax = round(actual_total_tax, 2)
+		
+		# CORRECTED: Compare JSON with ACTUAL ITEMS, not header!
+		json_discrepancy = round(json_total_tax - actual_total_tax, 2)
+		has_json_issue = abs(json_discrepancy) > 0.001
 		
 		# Compare JSON values with actual item tax amounts (for details)
 		items_comparison = []
@@ -359,17 +359,17 @@ def analyze_json_discrepancy(invoice_name):
 		return {
 			"success": True,
 			"invoice_name": invoice.name,
-			"detection_method": "Compare JSON total with HEADER total_taxes_and_charges (ZATCA method)",
+			"detection_method": "Compare JSON total with ACTUAL ITEM TAX AMOUNTS (sum of item.tax_amount) ← CORRECTED!",
 			"json_total_tax": round(json_total_tax, 2),
-			"header_tax_total": round(header_tax_total, 2),
 			"actual_total_tax": round(actual_total_tax, 2),
+			"header_tax_total": round(header_tax_total, 2),
 			"json_discrepancy": json_discrepancy,
 			"has_json_issue": has_json_issue,
 			"items_count": len(invoice.items),
 			"mismatched_items_count": len(mismatched_items),
 			"items_comparison": items_comparison,
 			"mismatched_items": mismatched_items,
-			"warning": "JSON total must match HEADER, not items!" if has_json_issue else None
+			"warning": "JSON must match ACTUAL ITEMS (not header)! Both JSON and header are wrong by 0.01 SAR!" if has_json_issue else None
 		}
 		
 	except Exception as e:
@@ -383,11 +383,13 @@ def analyze_json_discrepancy(invoice_name):
 @frappe.whitelist()
 def fix_json_discrepancy(invoice_name):
 	"""
-	Fix JSON discrepancy (BR-CO-14) - ZATCA COMPLIANT FIX
+	Fix JSON discrepancy (BR-CO-14) - ZATCA COMPLIANT FIX (CORRECTED)
 	
-	Method:
-	Rebuild item_wise_tax_detail JSON to match HEADER total_taxes_and_charges
-	Distribute header tax proportionally across items based on their net amounts
+	Method (CORRECTED):
+	Rebuild item_wise_tax_detail JSON to match ACTUAL ITEM TAX AMOUNTS
+	Then update HEADER to match the corrected JSON total
+	
+	This ensures: Items → JSON → Header all match!
 	
 	Args:
 		invoice_name: Name of the Sales Invoice
@@ -406,8 +408,12 @@ def fix_json_discrepancy(invoice_name):
 				"message": _("Invoice is not submitted")
 			}
 		
-		# Get header tax total (the target)
-		header_tax_total = float(invoice.total_taxes_and_charges or 0)
+		# Get actual item tax total (THE SOURCE OF TRUTH!)
+		actual_total_tax = sum(float(item.tax_amount or 0) for item in invoice.items)
+		actual_total_tax = round(actual_total_tax, 2)
+		
+		# Get current header tax
+		old_header_tax = float(invoice.total_taxes_and_charges or 0)
 		
 		# Get current JSON
 		old_item_wise_tax_json = {}
@@ -426,73 +432,78 @@ def fix_json_discrepancy(invoice_name):
 				old_json_total += float(tax_data[1])
 		old_json_total = round(old_json_total, 2)
 		
-		# Build new JSON to match header
-		# Strategy: Distribute header_tax_total proportionally based on net amounts
-		total_net = sum(float(item.net_amount or 0) for item in invoice.items)
-		
+		# Build new JSON to match ACTUAL ITEM TAX AMOUNTS
 		new_item_wise_tax_json = {}
 		fixed_items = []
 		new_json_total = 0
-		accumulated_tax = 0
 		
-		for idx, item in enumerate(invoice.items):
+		for item in invoice.items:
 			item_code = item.item_code or item.item_name
 			tax_rate = float(item.tax_rate or 0)
-			net_amount = float(item.net_amount or 0)
+			actual_item_tax = float(item.tax_amount or 0)
 			
 			# Get old JSON tax
 			old_json_tax = 0
 			if item_code in old_item_wise_tax_json:
 				old_json_tax = float(old_item_wise_tax_json[item_code][1]) if len(old_item_wise_tax_json[item_code]) > 1 else 0
 			
-			# Calculate proportional tax
-			if idx == len(invoice.items) - 1:
-				# Last item: use remaining to avoid rounding errors
-				new_tax = round(header_tax_total - accumulated_tax, 2)
-			else:
-				# Proportional distribution
-				if total_net > 0:
-					new_tax = round((net_amount / total_net) * header_tax_total, 2)
-				else:
-					new_tax = 0
-			
-			accumulated_tax += new_tax
+			# Use ACTUAL item tax (not proportional distribution!)
+			new_tax = round(actual_item_tax, 2)
 			new_json_total += new_tax
 			
 			# Update JSON
-			new_item_wise_tax_json[item_code] = [tax_rate, round(new_tax, 2)]
+			new_item_wise_tax_json[item_code] = [tax_rate, new_tax]
 			
 			if abs(old_json_tax - new_tax) > 0.001:
 				fixed_items.append({
 					"item_code": item_code,
 					"old_json_tax": round(old_json_tax, 2),
-					"new_json_tax": round(new_tax, 2),
+					"new_json_tax": new_tax,
+					"actual_item_tax": new_tax,
 					"adjustment": round(new_tax - old_json_tax, 2)
 				})
+		
+		new_json_total = round(new_json_total, 2)
 		
 		# Update tax line with new JSON
 		if invoice.taxes and len(invoice.taxes) > 0:
 			tax_row = invoice.taxes[0]
 			new_json_str = json.dumps(new_item_wise_tax_json, ensure_ascii=False)
 			
+			# CRITICAL: Also update header to match new JSON total!
 			frappe.db.sql("""
 				UPDATE `tabSales Taxes and Charges`
-				SET item_wise_tax_detail = %s
+				SET item_wise_tax_detail = %s,
+				    tax_amount = %s,
+				    base_tax_amount = %s,
+				    tax_amount_after_discount_amount = %s,
+				    base_tax_amount_after_discount_amount = %s
 				WHERE name = %s
-			""", (new_json_str, tax_row.name))
+			""", (new_json_str, new_json_total, new_json_total, 
+			      new_json_total, new_json_total, tax_row.name))
+		
+		# Update invoice header to match
+		frappe.db.sql("""
+			UPDATE `tabSales Invoice`
+			SET total_taxes_and_charges = %s,
+			    base_total_taxes_and_charges = %s
+			WHERE name = %s
+		""", (new_json_total, new_json_total, invoice_name))
 		
 		frappe.db.commit()
 		
 		return {
 			"success": True,
-			"message": _("JSON synchronized with header total_taxes_and_charges"),
+			"message": _("JSON synchronized with ACTUAL item tax amounts, header updated"),
 			"invoice_name": invoice_name,
 			"items_fixed": len(fixed_items),
 			"old_json_total": round(old_json_total, 2),
-			"new_json_total": round(new_json_total, 2),
-			"header_tax_total": round(header_tax_total, 2),
+			"new_json_total": new_json_total,
+			"old_header_tax": round(old_header_tax, 2),
+			"new_header_tax": new_json_total,
+			"actual_item_tax_total": actual_total_tax,
 			"fixed_items": fixed_items,
-			"method": "Proportional distribution to match header"
+			"method": "JSON now matches actual item tax amounts, header updated to match"
 		}
 		
 	except Exception as e:
