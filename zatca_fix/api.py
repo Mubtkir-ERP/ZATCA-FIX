@@ -109,14 +109,18 @@ def fix_invoice_tax(invoice_name):
 			except:
 				pass
 			
-			# Update tax for first item in JSON
-			if invoice.items and len(invoice.items) > 0:
-				first_item = invoice.items[0]
-				item_key = first_item.item_code or first_item.item_name
-				if item_key in item_wise_tax:
-					# Keep rate, update amount
-					tax_rate = item_wise_tax[item_key][0]
-					item_wise_tax[item_key] = [tax_rate, new_tax_row_amount]
+			# CRITICAL: Update JSON for ALL items to match their actual tax amounts
+			for item in invoice.items:
+				item_key = item.item_code or item.item_name
+				tax_rate = float(item.tax_rate or 0)
+				
+				# For first item, use new tax; for others, use their current tax
+				if item.name == invoice.items[0].name:
+					item_tax_for_json = new_tax_row_amount
+				else:
+					item_tax_for_json = float(item.tax_amount or 0)
+				
+				item_wise_tax[item_key] = [tax_rate, round(item_tax_for_json, 2)]
 			
 			item_wise_tax_json = json.dumps(item_wise_tax, ensure_ascii=False)
 			
@@ -136,6 +140,7 @@ def fix_invoice_tax(invoice_name):
 			      item_wise_tax_json, tax_row.name))
 		
 		# 3. Update first item: tax_amount and total_amount (keep net_amount unchanged)
+		# CRITICAL: Also update amount field to match (qty × rate)
 		if invoice.items and len(invoice.items) > 0:
 			first_item = invoice.items[0]
 			old_item_tax = float(first_item.tax_amount or 0)
@@ -145,14 +150,20 @@ def fix_invoice_tax(invoice_name):
 			item_net = float(first_item.net_amount or 0)
 			new_item_total = round(item_net + new_item_tax, 2)
 			
-			# CRITICAL: Update base_amount too!
+			# CRITICAL: Calculate correct amount from qty × rate
+			item_qty = float(first_item.qty or 0)
+			item_rate = float(first_item.rate or 0)
+			correct_amount = round(item_qty * item_rate, 2)
+			
+			# CRITICAL: Update all amount fields consistently!
 			frappe.db.sql("""
 				UPDATE `tabSales Invoice Item`
 				SET tax_amount = %s,
 				    total_amount = %s,
+				    amount = %s,
 				    base_amount = %s
 				WHERE name = %s
-			""", (new_item_tax, new_item_total, new_item_total, first_item.name))
+			""", (new_item_tax, new_item_total, correct_amount, correct_amount, first_item.name))
 		
 		frappe.db.commit()
 		
