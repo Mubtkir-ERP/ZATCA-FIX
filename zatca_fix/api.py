@@ -269,11 +269,13 @@ def analyze_invoice(invoice_name):
 @frappe.whitelist()
 def analyze_json_discrepancy(invoice_name):
 	"""
-	Analyze JSON discrepancy (BR-CO-14)
+	Analyze JSON discrepancy (BR-CO-14) - ZATCA AUDITOR MODE
 	
 	Detection Method:
-	Compare item_wise_tax_detail JSON values with actual item tax amounts
-	If they don't match, it's a JSON discrepancy that causes BR-CO-14
+	Compare item_wise_tax_detail JSON with HEADER total_taxes_and_charges
+	NOT with sum of item tax amounts!
+	
+	ZATCA reads from JSON and compares with header, not with items.
 	
 	Args:
 		invoice_name: Name of the Sales Invoice
@@ -292,6 +294,9 @@ def analyze_json_discrepancy(invoice_name):
 				"message": _("Invoice is not submitted")
 			}
 		
+		# Get header tax total (what ZATCA expects)
+		header_tax_total = float(invoice.total_taxes_and_charges or 0)
+		
 		# Get item_wise_tax_detail JSON from tax line
 		item_wise_tax_json = {}
 		if invoice.taxes and len(invoice.taxes) > 0:
@@ -302,24 +307,34 @@ def analyze_json_discrepancy(invoice_name):
 				except:
 					pass
 		
-		# Compare JSON values with actual item tax amounts
-		items_comparison = []
+		# Calculate JSON total
 		json_total_tax = 0
-		actual_total_tax = 0
+		for item_code, tax_data in item_wise_tax_json.items():
+			if isinstance(tax_data, list) and len(tax_data) > 1:
+				json_total_tax += float(tax_data[1])
+		
+		json_total_tax = round(json_total_tax, 2)
+		
+		# CRITICAL: Compare JSON with HEADER, not with items!
+		json_discrepancy = round(json_total_tax - header_tax_total, 2)
+		has_json_issue = abs(json_discrepancy) > 0.001
+		
+		# Also get actual item tax for reference
+		actual_total_tax = sum(float(item.tax_amount or 0) for item in invoice.items)
+		actual_total_tax = round(actual_total_tax, 2)
+		
+		# Compare JSON values with actual item tax amounts (for details)
+		items_comparison = []
 		mismatched_items = []
 		
 		for item in invoice.items:
 			item_code = item.item_code or item.item_name
 			actual_tax = float(item.tax_amount or 0)
-			actual_total_tax += actual_tax
 			
 			# Get tax from JSON
 			json_tax = 0
 			if item_code in item_wise_tax_json:
-				# JSON format: [tax_rate, tax_amount]
 				json_tax = float(item_wise_tax_json[item_code][1]) if len(item_wise_tax_json[item_code]) > 1 else 0
-			
-			json_total_tax += json_tax
 			
 			difference = round(json_tax - actual_tax, 2)
 			has_mismatch = abs(difference) > 0.001
@@ -341,21 +356,20 @@ def analyze_json_discrepancy(invoice_name):
 					"difference": difference
 				})
 		
-		json_discrepancy = round(json_total_tax - actual_total_tax, 2)
-		has_json_issue = abs(json_discrepancy) > 0.001
-		
 		return {
 			"success": True,
 			"invoice_name": invoice.name,
-			"detection_method": "Compare item_wise_tax_detail JSON with actual item tax amounts",
+			"detection_method": "Compare JSON total with HEADER total_taxes_and_charges (ZATCA method)",
 			"json_total_tax": round(json_total_tax, 2),
+			"header_tax_total": round(header_tax_total, 2),
 			"actual_total_tax": round(actual_total_tax, 2),
 			"json_discrepancy": json_discrepancy,
 			"has_json_issue": has_json_issue,
 			"items_count": len(invoice.items),
 			"mismatched_items_count": len(mismatched_items),
 			"items_comparison": items_comparison,
-			"mismatched_items": mismatched_items
+			"mismatched_items": mismatched_items,
+			"warning": "JSON total must match HEADER, not items!" if has_json_issue else None
 		}
 		
 	except Exception as e:
@@ -369,10 +383,11 @@ def analyze_json_discrepancy(invoice_name):
 @frappe.whitelist()
 def fix_json_discrepancy(invoice_name):
 	"""
-	Fix JSON discrepancy (BR-CO-14)
+	Fix JSON discrepancy (BR-CO-14) - ZATCA COMPLIANT FIX
 	
 	Method:
-	Synchronize item_wise_tax_detail JSON with actual item tax amounts
+	Rebuild item_wise_tax_detail JSON to match HEADER total_taxes_and_charges
+	Distribute header tax proportionally across items based on their net amounts
 	
 	Args:
 		invoice_name: Name of the Sales Invoice
@@ -391,6 +406,9 @@ def fix_json_discrepancy(invoice_name):
 				"message": _("Invoice is not submitted")
 			}
 		
+		# Get header tax total (the target)
+		header_tax_total = float(invoice.total_taxes_and_charges or 0)
+		
 		# Get current JSON
 		old_item_wise_tax_json = {}
 		if invoice.taxes and len(invoice.taxes) > 0:
@@ -401,33 +419,55 @@ def fix_json_discrepancy(invoice_name):
 				except:
 					pass
 		
-		# Build new JSON with actual tax amounts
+		# Calculate old JSON total
+		old_json_total = 0
+		for item_code, tax_data in old_item_wise_tax_json.items():
+			if isinstance(tax_data, list) and len(tax_data) > 1:
+				old_json_total += float(tax_data[1])
+		old_json_total = round(old_json_total, 2)
+		
+		# Build new JSON to match header
+		# Strategy: Distribute header_tax_total proportionally based on net amounts
+		total_net = sum(float(item.net_amount or 0) for item in invoice.items)
+		
 		new_item_wise_tax_json = {}
 		fixed_items = []
-		old_json_total = 0
 		new_json_total = 0
+		accumulated_tax = 0
 		
-		for item in invoice.items:
+		for idx, item in enumerate(invoice.items):
 			item_code = item.item_code or item.item_name
-			actual_tax = float(item.tax_amount or 0)
 			tax_rate = float(item.tax_rate or 0)
+			net_amount = float(item.net_amount or 0)
 			
 			# Get old JSON tax
 			old_json_tax = 0
 			if item_code in old_item_wise_tax_json:
 				old_json_tax = float(old_item_wise_tax_json[item_code][1]) if len(old_item_wise_tax_json[item_code]) > 1 else 0
 			
-			old_json_total += old_json_tax
-			new_json_total += actual_tax
+			# Calculate proportional tax
+			if idx == len(invoice.items) - 1:
+				# Last item: use remaining to avoid rounding errors
+				new_tax = round(header_tax_total - accumulated_tax, 2)
+			else:
+				# Proportional distribution
+				if total_net > 0:
+					new_tax = round((net_amount / total_net) * header_tax_total, 2)
+				else:
+					new_tax = 0
 			
-			# Update JSON with actual tax
-			new_item_wise_tax_json[item_code] = [tax_rate, round(actual_tax, 2)]
+			accumulated_tax += new_tax
+			new_json_total += new_tax
 			
-			if abs(old_json_tax - actual_tax) > 0.001:
+			# Update JSON
+			new_item_wise_tax_json[item_code] = [tax_rate, round(new_tax, 2)]
+			
+			if abs(old_json_tax - new_tax) > 0.001:
 				fixed_items.append({
 					"item_code": item_code,
 					"old_json_tax": round(old_json_tax, 2),
-					"new_json_tax": round(actual_tax, 2)
+					"new_json_tax": round(new_tax, 2),
+					"adjustment": round(new_tax - old_json_tax, 2)
 				})
 		
 		# Update tax line with new JSON
@@ -445,12 +485,14 @@ def fix_json_discrepancy(invoice_name):
 		
 		return {
 			"success": True,
-			"message": _("JSON discrepancy fixed successfully"),
+			"message": _("JSON synchronized with header total_taxes_and_charges"),
 			"invoice_name": invoice_name,
 			"items_fixed": len(fixed_items),
 			"old_json_total": round(old_json_total, 2),
 			"new_json_total": round(new_json_total, 2),
-			"fixed_items": fixed_items
+			"header_tax_total": round(header_tax_total, 2),
+			"fixed_items": fixed_items,
+			"method": "Proportional distribution to match header"
 		}
 		
 	except Exception as e:
@@ -468,11 +510,13 @@ def fix_json_discrepancy(invoice_name):
 @frappe.whitelist()
 def analyze_item_level_discrepancy(invoice_name):
 	"""
-	Analyze item-level internal discrepancies (BR-CO-16)
+	Analyze item-level discrepancies (BR-CO-16) - ZATCA AUDITOR MODE
 	
-	Detection Method:
-	For each item: item.amount should equal (item.net_amount + item.tax_amount)
-	This catches "lost halalas" within individual items
+	Detection Method (DUAL CHECK):
+	1. Internal Balance: item.amount should equal (item.net_amount + item.tax_amount)
+	2. Price Match: item.amount should equal (item.qty × item.rate) ← ZATCA CHECK!
+	
+	This catches "lost halalas" that pass internal validation but fail ZATCA
 	
 	Args:
 		invoice_name: Name of the Sales Invoice
@@ -497,24 +541,40 @@ def analyze_item_level_discrepancy(invoice_name):
 			stored_amount = float(item.amount or 0)
 			net_amount = float(item.net_amount or 0)
 			tax_amount = float(item.tax_amount or 0)
+			qty = float(item.qty or 0)
+			rate = float(item.rate or 0)
 			
-			calculated_amount = round(net_amount + tax_amount, 2)
-			difference = round(stored_amount - calculated_amount, 2)
-			has_discrepancy = abs(difference) > 0.001
+			# Internal balance check
+			calculated_from_net_tax = round(net_amount + tax_amount, 2)
+			internal_difference = round(stored_amount - calculated_from_net_tax, 2)
+			
+			# ZATCA check: qty × rate
+			expected_from_price = round(qty * rate, 2)
+			price_difference = round(stored_amount - expected_from_price, 2)
+			
+			# Item has issue if EITHER check fails
+			has_internal_issue = abs(internal_difference) > 0.001
+			has_price_issue = abs(price_difference) > 0.001
+			has_discrepancy = has_internal_issue or has_price_issue
 			
 			items_analysis.append({
 				"name": item.name,
 				"item_code": item.item_code,
 				"item_name": item.item_name,
-				"qty": item.qty,
-				"rate": round(float(item.rate or 0), 2),
+				"qty": qty,
+				"rate": round(rate, 2),
 				"stored_amount": round(stored_amount, 2),
 				"net_amount": round(net_amount, 2),
 				"tax_rate": round(float(item.tax_rate or 0), 2),
 				"tax_amount": round(tax_amount, 2),
-				"calculated_amount": round(calculated_amount, 2),
-				"difference": difference,
-				"has_discrepancy": has_discrepancy
+				"calculated_from_net_tax": round(calculated_from_net_tax, 2),
+				"expected_from_price": round(expected_from_price, 2),
+				"internal_difference": internal_difference,
+				"price_difference": price_difference,
+				"has_internal_issue": has_internal_issue,
+				"has_price_issue": has_price_issue,
+				"has_discrepancy": has_discrepancy,
+				"issue_type": "Price Mismatch (ZATCA)" if has_price_issue else ("Internal Imbalance" if has_internal_issue else "OK")
 			})
 			
 			if has_discrepancy:
@@ -524,17 +584,23 @@ def analyze_item_level_discrepancy(invoice_name):
 					"stored_amount": round(stored_amount, 2),
 					"net_amount": round(net_amount, 2),
 					"tax_amount": round(tax_amount, 2),
-					"calculated_amount": round(calculated_amount, 2),
-					"difference": difference
+					"qty": qty,
+					"rate": round(rate, 2),
+					"calculated_from_net_tax": round(calculated_from_net_tax, 2),
+					"expected_from_price": round(expected_from_price, 2),
+					"internal_difference": internal_difference,
+					"price_difference": price_difference,
+					"issue_type": "Price Mismatch (ZATCA)" if has_price_issue else "Internal Imbalance"
 				})
-				total_item_discrepancy += difference
+				# Use price difference for total (ZATCA's view)
+				total_item_discrepancy += price_difference if has_price_issue else internal_difference
 		
 		has_item_discrepancy = len(problematic_items) > 0
 		
 		return {
 			"success": True,
 			"invoice_name": invoice.name,
-			"detection_method": "item.amount vs (item.net_amount + item.tax_amount)",
+			"detection_method": "DUAL: (1) amount vs (net+tax), (2) amount vs (qty×rate) ← ZATCA",
 			"has_item_discrepancy": has_item_discrepancy,
 			"problematic_items_count": len(problematic_items),
 			"total_discrepancy": round(total_item_discrepancy, 2),
@@ -553,10 +619,12 @@ def analyze_item_level_discrepancy(invoice_name):
 @frappe.whitelist()
 def fix_item_level_discrepancy(invoice_name):
 	"""
-	Fix item-level discrepancies (BR-CO-16)
+	Fix item-level discrepancies (BR-CO-16) - ZATCA COMPLIANT FIX
 	
 	Method:
-	Adjust item.amount to match (item.net_amount + item.tax_amount)
+	1. Recalculate item total from qty × rate (ZATCA's expectation)
+	2. Redistribute to net and tax while maintaining tax rate
+	3. Ensure: net + tax = qty × rate (exact match)
 	
 	Args:
 		invoice_name: Name of the Sales Invoice
@@ -580,33 +648,60 @@ def fix_item_level_discrepancy(invoice_name):
 		fixed_items = []
 		
 		for item_data in analysis["problematic_items"]:
-			new_amount = round(item_data["net_amount"] + item_data["tax_amount"], 2)
+			# ZATCA FIX: Use qty × rate as the correct total
+			correct_total = round(item_data["qty"] * item_data["rate"], 2)
 			
-			# CRITICAL: Also update base_amount and ensure amount matches rate × qty
+			# Recalculate net and tax to match correct total
+			# Method: Keep tax rate, adjust amounts
+			tax_rate = float(item_data.get("tax_rate", 15)) / 100
+			
+			# Calculate net from total: net = total / (1 + tax_rate)
+			new_net = round(correct_total / (1 + tax_rate), 2)
+			
+			# Calculate tax as difference to ensure exact match
+			new_tax = round(correct_total - new_net, 2)
+			
+			# Verify: net + tax = total (must be exact!)
+			verification = round(new_net + new_tax, 2)
+			if abs(verification - correct_total) > 0.001:
+				# Adjust tax by the tiny difference
+				new_tax = round(correct_total - new_net, 2)
+			
+			# Update database
 			frappe.db.sql("""
 				UPDATE `tabSales Invoice Item`
-				SET amount = %s,
-				    base_amount = %s,
-				    total_amount = %s
+				SET 
+					amount = %s,
+					base_amount = %s,
+					net_amount = %s,
+					base_net_amount = %s,
+					tax_amount = %s,
+					total_amount = %s
 				WHERE name = %s
-			""", (new_amount, new_amount, new_amount, item_data["name"]))
+			""", (correct_total, correct_total, new_net, new_net, new_tax, correct_total, item_data["name"]))
 			
 			fixed_items.append({
 				"item_code": item_data["item_code"],
 				"old_amount": item_data["stored_amount"],
-				"new_amount": new_amount,
-				"adjustment": round(new_amount - item_data["stored_amount"], 2)
+				"new_amount": correct_total,
+				"old_net": item_data["net_amount"],
+				"new_net": new_net,
+				"old_tax": item_data["tax_amount"],
+				"new_tax": new_tax,
+				"adjustment": round(correct_total - item_data["stored_amount"], 2),
+				"method": f"Recalculated from {item_data['qty']} × {item_data['rate']}"
 			})
 		
 		frappe.db.commit()
 		
 		return {
 			"success": True,
-			"message": _("Item discrepancies fixed successfully"),
+			"message": _("Item discrepancies fixed using ZATCA method (qty × rate)"),
 			"invoice_name": invoice_name,
 			"items_fixed": len(fixed_items),
 			"total_adjustment": round(analysis["total_discrepancy"], 2),
-			"fixed_items": fixed_items
+			"fixed_items": fixed_items,
+			"method": "ZATCA Compliant: amount = qty × rate, then redistribute to net + tax"
 		}
 		
 	except Exception as e:
