@@ -146,6 +146,21 @@ doctype_js = {
 # 		"on_trash": "method"
 # 	}
 # }
+doc_events = {
+    "Sales Invoice": {
+        "validate": "your_app.your_module.utils.fix_pos_rounding_issues"
+    }
+}
+
+# Document Events
+# ---------------
+# Hook on document methods and events
+
+doc_events = {
+    "Sales Invoice": {
+        "validate": "zatca_fix.utils.fix_pos_rounding_issues"
+    }
+}
 
 # Scheduled Tasks
 # ---------------
