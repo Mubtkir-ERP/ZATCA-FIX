@@ -1,71 +1,36 @@
-# ZATCA Fix - Installation Guide
+# Installation / Upgrade
 
-## 🚀 Quick Installation
+## Existing installation
 
-### Step 1: Install the App
+Replace the app code with this version, then run:
 
 ```bash
-# Navigate to bench directory
-cd /path/to/frappe-bench
-
-# Install the app on your site
-bench --site your-site.com install-app zatca_fix
-
-# Build assets
+bench --site YOUR-SITE migrate
 bench build --app zatca_fix
-
-# Restart
+bench clear-cache
 bench restart
 ```
 
-### Step 2: Verify Installation
+If you use production workers/scheduler, make sure all workers have restarted so the `before_job` runtime patch is loaded.
 
-1. Open ERPNext
-2. Go to any submitted Sales Invoice
-3. You should see **ZATCA** menu with two options:
-   - Analyze BR-CO-15
-   - Fix BR-CO-15
+## Verification
 
-## ✅ That's it!
+Open a submitted Sales Invoice and choose:
 
-No additional configuration needed. The app is ready to use.
+**ZATCA Fix → حالة التصحيح**
 
-## 📋 Usage
+It should show that the XML-only patch is active.
 
-### Analyze Invoice:
-```
-1. Open submitted Sales Invoice
-2. Click ZATCA → Analyze BR-CO-15
-3. View detailed analysis
-```
+Then choose:
 
-### Fix Invoice:
-```
-1. Open submitted Sales Invoice
-2. Click ZATCA → Fix BR-CO-15
-3. Confirm the action
-4. Done!
-```
+**ZATCA Fix → فحص توافق XML**
 
-## 🔧 Troubleshooting
+No Sales Invoice accounting value is changed by these actions.
 
-### Buttons not showing?
-```bash
-# Clear cache
-bench --site your-site.com clear-cache
+## Rejected invoice
 
-# Rebuild
-bench build --app zatca_fix
+For an invoice whose latest RUKN `Sales Invoice Additional Fields` status is `Rejected`, use:
 
-# Restart
-bench restart
-```
+**ZATCA Fix → إصلاح وإعادة إرسال المرفوض**
 
-### Permission errors?
-```bash
-# Make sure you have write permission on Sales Invoice
-```
-
-## 📞 Support
-
-For issues, please check the README.md file or contact support.
+This delegates the retry to RUKN's official `Fix Rejection` backend. RUKN creates the new attempt; ZATCA Fix only normalizes the newly generated unsigned XML before signing.

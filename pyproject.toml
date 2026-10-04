@@ -3,7 +3,7 @@ name = "zatca_fix"
 authors = [
     { name = "Zatca Fix", email = "nada@gmail.com"}
 ]
-description = "Zatca Fix"
+description = "Safe XML-level ZATCA fixes for RUKN KSA Compliance"
 requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
