@@ -1,3 +1,21 @@
+<!-- MUBTKIR-UNIFIED-README-START -->
+## توافق الفوترة الإلكترونية (ZATCA) | ZATCA Fix
+
+طبقة توافق وإصلاحات آمنة لمعالجة تقريب XML ومتطلبات هيئة الزكاة والضريبة والجمارك (المرحلة الثانية).
+* **الفئة المستهدفة:** الشركات والمؤسسات في المملكة العربية السعودية المطبّقة للفوترة الإلكترونية.
+
+Safe XML-level compatibility and rounding fixes for Saudi ZATCA Phase 2 e-invoicing on ERPNext.
+* **Target Audience:** Businesses in Saudi Arabia using ERPNext with ZATCA Phase 2 compliance.
+
+### تواصل معنا | Contact & Sales — [مبتكر للأنظمة السحابية | Mubtkir ERP](https://mubtkir.com)
+
+* 🌐 **الموقع الرسمي | Website:** [Mubtkir ERP — حلول ERPNext السحابية](https://mubtkir.com)
+* 📧 **البريد الإلكتروني | Email:** [sales@mubtkir.com](mailto:sales@mubtkir.com)
+* 📱 **الجوال | Mobile:** [+966547706865](tel:+966547706865)
+* 💬 **واتساب | WhatsApp:** [+966126810486](https://wa.me/966126810486)
+
+<!-- MUBTKIR-UNIFIED-README-END -->
+
 # ZATCA Fix 0.2.0
 
 A safe compatibility layer for **RUKN / KSA Compliance** on ERPNext.
